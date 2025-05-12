@@ -5,8 +5,8 @@
 #include "math.h"
 
 /*DISCLAIMER*/
-// For Motor Driver L we use these colors: GND Black, EN Brown, PWM Red
-// For Motor Driver R we use these colors: GND White, EN Purple, PWM Blue
+// For Motor Driver L(OUT 1) we use these colors: GND Black, EN Brown, PWM Red
+// For Motor Driver R(OUT 2) we use these colors: GND White, EN Purple, PWM Blue
 
 /*Pin Definition*/
 #define EN_left 8
@@ -19,8 +19,9 @@
 
 // Define IR pins for opponent detection
 // sensor alignment: 13 back, 14 left, .. front left, .. center, .. front right, .. right
-int IRPins[] = {13, 14};
-int IRCount = 2;
+
+int IRPins[] = {7,21,13,20,14,6};
+int IRCount = 6;
 
 // Define QTR sensor pins for edge detection
 const uint8_t QTRPins[] = {2, 3, 4, 5};
@@ -33,12 +34,14 @@ int SensorCount = 4;
 
 // Macros for motor speeds (0–255)
 #define STOP_SPEED 128
-#define ATTACK_SPEED_FWD 61
-#define ATTACK_SPEED_BWD 195
-#define RETREAT_SPEED_BWD 255
-#define RETREAT_SPEED_FWD 0
-#define SEARCH_SPEED_FWD 1
-#define SEARCH_SPEED_BWD 215
+#define ATTACK_SPEED_FWD 135
+#define ATTACK_SPEED_BWD 120
+
+#define RETREAT_SPEED_BWD 161
+#define RETREAT_SPEED_FWD 80
+
+#define SEARCH_SPEED_FWD 135
+#define SEARCH_SPEED_BWD 120
 
 #define PWM_FREQ 3900      // Target PWM frequency in Hz
 #define PWM_RESOLUTION 255 // 8-bit resolution
@@ -189,16 +192,20 @@ void loop()
   uint16_t sensorValue[SensorCount];
   qtr.read(sensorValue, QTRReadMode::On);
 
-  while (sumArray(sensorValue, SensorCount) < EDGE_THRESHOLD)
+  int IRValues[IRCount] = {0,0,0,0,0,0}; // Array to store IR sensor values
+
+  // while (sumArray(sensorValue, SensorCount) < EDGE_THRESHOLD)
+  while(1)
   {
 
-    int IRValues[IRCount]; // Array to store IR sensor values
 
     for (int i = 0; i < IRCount; i++)
     { // Read IR sensors
 
       IRValues[i] = digitalRead(IRPins[i]);
     }
+
+
 
     // choose where to attack
 
@@ -207,32 +214,43 @@ void loop()
       // Attack backward
       setLeftMotor(ATTACK_SPEED_BWD);
       setRightMotor(ATTACK_SPEED_BWD);
+
+      Serial.println("Attacking backward");
     }
     else if (IRValues[1] == 1) // opponent is located at the left
     {
       // Attack left
-      setLeftMotor(ATTACK_SPEED_BWD);
-      setRightMotor(ATTACK_SPEED_FWD);
+      setLeftMotor(ATTACK_SPEED_FWD);
+      setRightMotor(ATTACK_SPEED_BWD);
+
+      Serial.println("Attacking left");
     }
     else if (IRValues[2] == 1 || IRValues[3] == 1 || IRValues[4] == 1) // opponent is located at the center
     {
       // Attack center
       setLeftMotor(ATTACK_SPEED_FWD);
       setRightMotor(ATTACK_SPEED_FWD);
+
+      Serial.println("Attacking center");
     }
     else if (IRValues[5] == 1) // opponent is located at right
     {
       // Attack right
-      setLeftMotor(ATTACK_SPEED_FWD);
-      setRightMotor(ATTACK_SPEED_BWD);
+      setLeftMotor(ATTACK_SPEED_BWD);
+      setRightMotor(ATTACK_SPEED_FWD);
+
+      Serial.println("Attacking right");
     }
     else // no opponent detected
     {
       // Search for opponent
-      setLeftMotor(SEARCH_SPEED_FWD);
-      setRightMotor(SEARCH_SPEED_BWD);
+      // setLeftMotor(SEARCH_SPEED_FWD);
+      // setRightMotor(SEARCH_SPEED_BWD);
+
+      // Serial.println("Searching for opponent");
     }
 
-    qtr.read(sensorValue, QTRReadMode::On);
+    // qtr.read(sensorValue, QTRReadMode::On);
   }
+
 }
