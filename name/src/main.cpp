@@ -32,13 +32,13 @@ int SensorCount = 4;
 #define ATTACK_SPEED_BWD 96   // Backward attack
 #define RETREAT_SPEED_FWD 140 // Forward retreat
 #define RETREAT_SPEED_BWD 116 // Backward retreat
-#define SEARCH_SPEED_FWD 140  // Forward search
-#define SEARCH_SPEED_BWD 116  // Backward search
+#define SEARCH_SPEED_FWD 146  // Forward search
+#define SEARCH_SPEED_BWD 110  // Backward search
 
 // Search pattern timing (in milliseconds)
-const unsigned int FORWARD_TIME = 500;  // Forward phase
-const unsigned int BACKWARD_TIME = 500; // Backward phase
-const unsigned int TURN_TIME = 25;     // Turn phase
+const unsigned int FORWARD_TIME = 250;  // Forward phase
+const unsigned int BACKWARD_TIME = 250; // Backward phase
+const unsigned int TURN_TIME = 5;     // Turn phase
 
 /*===== THRESHOLDS =====*/
 #define EDGE_THRESHOLD 400   // Value indicating ring edge
@@ -101,7 +101,7 @@ void setup()
   setupPWM(PWM_left, slice_left);
   setupPWM(PWM_right, slice_right);
 
-  Serial.begin(9600);
+  Serial.begin(115200);
   Serial.println("Sumo robot initialized. Waiting for start signal.");
 }
 
@@ -230,24 +230,24 @@ void loop()
    case 1: { // Opponent at back
     // Faster backward attack with slight direction bias based on last attack
     if (lastOpponentState == 2) { // If opponent was recently at left
-      setLeftMotor(ATTACK_SPEED_BWD - 10); // Turn more sharply
-      setRightMotor(ATTACK_SPEED_BWD + 5);
+      setLeftMotor(SEARCH_SPEED_BWD - 5); // Turn more sharply
+      setRightMotor(SEARCH_SPEED_BWD + 5);
     } else if (lastOpponentState == 4) { // If opponent was recently at right
-      setLeftMotor(ATTACK_SPEED_BWD + 5);
-      setRightMotor(ATTACK_SPEED_BWD - 10); // Turn more sharply
+      setLeftMotor(SEARCH_SPEED_BWD + 5);
+      setRightMotor(SEARCH_SPEED_BWD - 5); // Turn more sharply
     } else {
       // Faster backward attack
-      setLeftMotor(ATTACK_SPEED_BWD - 10); // More speed (lower value = faster backward)
-      setRightMotor(ATTACK_SPEED_BWD - 10);
+      setLeftMotor(SEARCH_SPEED_BWD - 10); // More speed (lower value = faster backward)
+      setRightMotor(SEARCH_SPEED_BWD - 10);
     }
     logStateChange("Attacking backward", IRValues[0], lastIRValues[0]);
     break;
   }
   case 2: { // Opponent at left
     // More aggressive left turn with initial burst
-    
-     setLeftMotor(ATTACK_SPEED_BWD - 10); // Higher backward speed
-    setRightMotor(ATTACK_SPEED_FWD + 15); // Higher forward speed
+
+    setLeftMotor(SEARCH_SPEED_BWD); // Higher backward speed
+    setRightMotor(SEARCH_SPEED_FWD + 2); // Higher forward speed
     logStateChange("Attacking left", IRValues[1], lastIRValues[1]);
     break;
   }
@@ -255,16 +255,16 @@ void loop()
     // Optimize frontal attack with directional bias based on which sensors are active
     if (IRValues[2] && !IRValues[4]) {
       // Opponent slightly left of center - adjust trajectory
-      setLeftMotor(ATTACK_SPEED_FWD + 15);
-      setRightMotor(ATTACK_SPEED_FWD + 25); // Right motor faster to turn slightly left
+      setLeftMotor(SEARCH_SPEED_FWD + 15);
+      setRightMotor(SEARCH_SPEED_FWD + 20); // Right motor faster to turn slightly left
     } else if (!IRValues[2] && IRValues[4]) {
       // Opponent slightly right of center - adjust trajectory
-      setLeftMotor(ATTACK_SPEED_FWD + 25); // Left motor faster to turn slightly right
-      setRightMotor(ATTACK_SPEED_FWD + 15);
+      setLeftMotor(SEARCH_SPEED_FWD + 25); // Left motor faster to turn slightly right
+      setRightMotor(SEARCH_SPEED_FWD + 20);
     } else {
       // Direct center attack with max speed
-      setLeftMotor(ATTACK_SPEED_FWD + 30); // Much higher speed
-      setRightMotor(ATTACK_SPEED_FWD + 30);
+      setLeftMotor(SEARCH_SPEED_FWD + 30); // Much higher speed
+      setRightMotor(SEARCH_SPEED_FWD + 30);
     }
     logStateChange("Attacking center",
                   (IRValues[2] || IRValues[3] || IRValues[4]),
@@ -273,8 +273,8 @@ void loop()
   }
   case 4: { // Opponent at right
     // More aggressive right turn with initial burst
-   setLeftMotor(ATTACK_SPEED_FWD + 15); // Higher forward speed
-    setRightMotor(ATTACK_SPEED_BWD - 10); // Higher backward speed
+    setLeftMotor(SEARCH_SPEED_FWD + 4); // Higher forward speed
+    setRightMotor(SEARCH_SPEED_BWD); // Higher backward speed
     logStateChange("Attacking right", IRValues[5], lastIRValues[5]);
     break;
   }
