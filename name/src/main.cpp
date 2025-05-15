@@ -17,7 +17,7 @@
 
 // IR sensor pins for opponent detection (6 sensors)
 // Arrangement: back, left, front-left, center, front-right, right
-int IRPins[] = {7, 21, 13, 20, 14, 6};
+int IRPins[] = {13, 14, 6, 20, 7, 21};
 int IRCount = 6;
 
 // QTR sensor pins for edge detection (4 sensors)
@@ -159,14 +159,19 @@ void loop()
   //   delay(150);
   //   return;
   // }
-  // */
+  
 
- // 3. Read IR sensors for opponent detection
+ //3. Read IR sensors for opponent detection
   int IRValues[IRCount] = {0};
   for (int i = 0; i < IRCount; i++)
   {
     IRValues[i] = digitalRead(IRPins[i]);
+    Serial.print(IRValues[i]);
+    Serial.print(" ");
   }
+
+  Serial.println();
+
 
   // 4. Determine opponent position (0=none, 1=back, 2=left, 3=center, 4=right)
   int opponentState = 0;
@@ -222,30 +227,54 @@ void loop()
     
     break;
   }
-  case 1: { // Opponent at back
-    setLeftMotor(ATTACK_SPEED_BWD);
-    setRightMotor(ATTACK_SPEED_BWD);
+   case 1: { // Opponent at back
+    // Faster backward attack with slight direction bias based on last attack
+    if (lastOpponentState == 2) { // If opponent was recently at left
+      setLeftMotor(ATTACK_SPEED_BWD - 10); // Turn more sharply
+      setRightMotor(ATTACK_SPEED_BWD + 5);
+    } else if (lastOpponentState == 4) { // If opponent was recently at right
+      setLeftMotor(ATTACK_SPEED_BWD + 5);
+      setRightMotor(ATTACK_SPEED_BWD - 10); // Turn more sharply
+    } else {
+      // Faster backward attack
+      setLeftMotor(ATTACK_SPEED_BWD - 10); // More speed (lower value = faster backward)
+      setRightMotor(ATTACK_SPEED_BWD - 10);
+    }
     logStateChange("Attacking backward", IRValues[0], lastIRValues[0]);
     break;
   }
   case 2: { // Opponent at left
-    setLeftMotor(ATTACK_SPEED_FWD);
-    setRightMotor(ATTACK_SPEED_BWD);
+    // More aggressive left turn with initial burst
+    
+     setLeftMotor(ATTACK_SPEED_BWD - 10); // Higher backward speed
+    setRightMotor(ATTACK_SPEED_FWD + 15); // Higher forward speed
     logStateChange("Attacking left", IRValues[1], lastIRValues[1]);
     break;
   }
   case 3: { // Opponent at center
-    // Full speed attack for center - fastest reaction
-    setLeftMotor(ATTACK_SPEED_FWD + 10);
-    setRightMotor(ATTACK_SPEED_FWD + 10);
+    // Optimize frontal attack with directional bias based on which sensors are active
+    if (IRValues[2] && !IRValues[4]) {
+      // Opponent slightly left of center - adjust trajectory
+      setLeftMotor(ATTACK_SPEED_FWD + 15);
+      setRightMotor(ATTACK_SPEED_FWD + 25); // Right motor faster to turn slightly left
+    } else if (!IRValues[2] && IRValues[4]) {
+      // Opponent slightly right of center - adjust trajectory
+      setLeftMotor(ATTACK_SPEED_FWD + 25); // Left motor faster to turn slightly right
+      setRightMotor(ATTACK_SPEED_FWD + 15);
+    } else {
+      // Direct center attack with max speed
+      setLeftMotor(ATTACK_SPEED_FWD + 30); // Much higher speed
+      setRightMotor(ATTACK_SPEED_FWD + 30);
+    }
     logStateChange("Attacking center",
                   (IRValues[2] || IRValues[3] || IRValues[4]),
                   (lastIRValues[2] || lastIRValues[3] || lastIRValues[4]));
     break;
   }
   case 4: { // Opponent at right
-    setLeftMotor(ATTACK_SPEED_BWD);
-    setRightMotor(ATTACK_SPEED_FWD);
+    // More aggressive right turn with initial burst
+   setLeftMotor(ATTACK_SPEED_FWD + 15); // Higher forward speed
+    setRightMotor(ATTACK_SPEED_BWD - 10); // Higher backward speed
     logStateChange("Attacking right", IRValues[5], lastIRValues[5]);
     break;
   }
@@ -253,6 +282,13 @@ void loop()
 
 // Update last opponent state for next loop
 lastOpponentState = opponentState;
+
+
+// setLeftMotor(SEARCH_SPEED_FWD);
+// setRightMotor(SEARCH_SPEED_FWD - 1);
+
+// setLeftMotor(SEARCH_SPEED_BWD);
+// setRightMotor(SEARCH_SPEED_BWD - 1);
 
 
 }
