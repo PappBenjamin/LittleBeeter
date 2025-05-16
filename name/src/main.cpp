@@ -3,11 +3,11 @@
 #include <Arduino.h>
 #include "hardware/pwm.h"
 
-//asd
+// asd
 
-//yes
-// left motor driver red black
-// right motor driver black red
+// yes
+//  left motor driver red black
+//  right motor driver black red
 
 /*===== PIN DEFINITIONS =====*/
 // Motor control pins
@@ -16,10 +16,12 @@
 #define PWM_left 11
 #define PWM_right 9
 #define startPin 12 // starter pin
+#define TMP_1 26
+#define TMP_2 27
 
 // IR sensor pins for opponent detection (6 sensors)
 // Arrangement: back, left, front-left, center, front-right, right
-int IRPins[] = {13, 14, 6, 20, 7, 21};
+int IRPins[] = {7, 14, 20, 6, 21, 13};
 int IRCount = 6;
 
 // QTR sensor pins for edge detection (4 sensors)
@@ -30,17 +32,23 @@ int SensorCount = 4;
 /*===== MOVEMENT SETTINGS =====*/
 // Motor speeds (0-255, 128 is stop)
 #define STOP_SPEED 128
-#define ATTACK_SPEED_FWD 160  // Forward attack
-#define ATTACK_SPEED_BWD 96   // Backward attack
+#define ATTACK_SPEED_FWD 146  // Forward attack
+#define ATTACK_SPEED_BWD 110  // Backward attack
 #define RETREAT_SPEED_FWD 140 // Forward retreat
 #define RETREAT_SPEED_BWD 116 // Backward retreat
 #define SEARCH_SPEED_FWD 146  // Forward search
 #define SEARCH_SPEED_BWD 110  // Backward search
 
+// Optimized turning parameters
+#define TURN_SPEED_AGGRESSIVE 15 // For sharp turns
+#define TURN_SPEED_MODERATE 10   // For moderate turns
+#define TURN_SPEED_GENTLE 5      // For gentle turning
+#define BACK_TURN_TIME 300       // Reduced from 350ms for more precise 180° turns
+
 // Search pattern timing (in milliseconds)
 const unsigned int FORWARD_TIME = 250;  // Forward phase
 const unsigned int BACKWARD_TIME = 250; // Backward phase
-const unsigned int TURN_TIME = 5;     // Turn phase
+const unsigned int TURN_TIME = 5;       // Turn phase
 
 /*===== THRESHOLDS =====*/
 #define EDGE_THRESHOLD 400   // Value indicating ring edge
@@ -58,6 +66,31 @@ unsigned long lastSerialOutput = 0;
 const unsigned long SERIAL_INTERVAL = 300; // Print interval
 int lastIRValues[6] = {0};                 // Previous IR readings
 unsigned long searchStartTime = 0;
+
+// Back attack state machine variables
+unsigned long backAttackTimer = 0;
+int backAttackState = 0; // 0=turn, 1=attack
+
+// Global variables for improved sensor debouncing
+#define IR_DEBOUNCE_COUNT 2                   // Number of consecutive readings to confirm detection
+int IRConfirmedCount[6] = {0, 0, 0, 0, 0, 0}; // Counters for debouncing
+
+// Search pattern state machine variables
+unsigned long searchPatternTimer = 0;
+int searchPatternState = 0; // 0=forward, 1=backward, 2=turn
+int lastOpponentState = -1; // Track if we just came from detecting an opponent
+
+// Add a variable to track time spent in states to detect if stuck
+unsigned long stateEntryTime = 0;
+#define MAX_STATE_TIME 2000 // Maximum time to spend in any state (ms)
+
+// Temperature safety check variables
+unsigned long lastTempCheckTime = 0;
+const unsigned long TEMP_CHECK_INTERVAL = 1000; // Check temperature every 1 second
+
+// Add these to your GLOBAL VARIABLES section
+unsigned long turnStabilizeTimer = 0;
+bool stabilizingTurn = false;
 
 /*===== SETUP FUNCTIONS =====*/
 // Configure PWM on a pin
@@ -103,6 +136,9 @@ void setup()
   setupPWM(PWM_left, slice_left);
   setupPWM(PWM_right, slice_right);
 
+  // Congigure temp sensors
+  pinMode(TMP_1, INPUT);
+
   Serial.begin(115200);
   Serial.println("Sumo robot initialized. Waiting for start signal.");
 }
@@ -130,169 +166,39 @@ void stopMotors()
   Serial.println("Motors stopped.");
 }
 
+// Corrected temperature mapping with proper offset and inversion
+float mapTemperature(int analogValue)
+{
+  // Prevent division by zero or invalid readings
+  if (analogValue <= 0 || analogValue >= 1023)
+    return -10.0;
+
+  // Calculate thermistor resistance using voltage divider formula
+  float resistance = 10000.0 * ((1023.0 / (float)analogValue) - 1.0);
+
+  // Use the B-parameter equation (simplified Steinhart-Hart)
+  float steinhart = log(resistance / 10000.0);
+  steinhart /= 3950.0;
+  steinhart += 1.0 / 298.15;
+  steinhart = 1.0 / steinhart;
+  float celsius = steinhart - 273.15;
+
+  // Apply 20°C correction offset
+
+  return map(celsius, 50, -50, 24.0, 120.0) - 10; // Map to 0-1 range
+  // return celsius; // Return the temperature in Celsius
+}
 
 void logMessage(const char *message);
 void logStateChange(const char *message, int newState, int oldState);
-
-
-// Search pattern state machine variables
-unsigned long searchPatternTimer = 0;
-int searchPatternState = 0; // 0=forward, 1=backward, 2=turn
-int lastOpponentState = -1; // Track if we just came from detecting an opponent
-
+void printImportantInfo(uint16_t sensorValue[], int IRValues[]);
+void mainFUNC();
 
 /*===== MAIN LOOP =====*/
 void loop()
 {
-  // // 1. Read sensors
-  // // Uncomment to enable edge detection
-  // /*
-  // uint16_t sensorValue[SensorCount];
-  // qtr.read(sensorValue, QTRReadMode::On);
 
-  // // 2. Check for ring edge (highest priority)
-  // if (sensorValue[0] < EDGE_THRESHOLD || sensorValue[3] < EDGE_THRESHOLD) {
-  //   // Edge detected - back up and turn away
-  //   setLeftMotor(RETREAT_SPEED_BWD);
-  //   setRightMotor(RETREAT_SPEED_BWD);
-  //   delay(200);
-  //   setLeftMotor(RETREAT_SPEED_BWD);
-  //   setRightMotor(RETREAT_SPEED_FWD);
-  //   delay(150);
-  //   return;
-  // }
-  
-
- //3. Read IR sensors for opponent detection
-  int IRValues[IRCount] = {0};
-  for (int i = 0; i < IRCount; i++)
-  {
-    IRValues[i] = digitalRead(IRPins[i]);
-    Serial.print(IRValues[i]);
-    Serial.print(" ");
-  }
-
-  Serial.println();
-
-
-  // 4. Determine opponent position (0=none, 1=back, 2=left, 3=center, 4=right)
-  int opponentState = 0;
-  if (IRValues[0] == 1)
-    opponentState = 1; // Back
-  else if (IRValues[1] == 1)
-    opponentState = 2; // Left
-  else if (IRValues[2] == 1 || IRValues[3] == 1 || IRValues[4] == 1)
-    opponentState = 3; // Center
-  else if (IRValues[5] == 1)
-    opponentState = 4; // Right
-
-  // 5. React based on opponent position
-  switch (opponentState)
-{
-  case 0: { // No opponent - search pattern
-    unsigned long currentMillis = millis();
-    
-    // Reset search state if we just lost track of opponent
-    if (lastOpponentState != 0) {
-      searchPatternState = 0;
-      searchPatternTimer = currentMillis;
-    }
-    
-    // State machine for search pattern
-    if (searchPatternState == 0) { // Forward phase
-      setLeftMotor(SEARCH_SPEED_FWD);
-      setRightMotor(SEARCH_SPEED_FWD - 1);
-      
-      if (currentMillis - searchPatternTimer >= FORWARD_TIME) {
-        searchPatternState = 1;
-        searchPatternTimer = currentMillis;
-      }
-    }
-    else if (searchPatternState == 1) { // Backward phase
-      setLeftMotor(SEARCH_SPEED_BWD);
-      setRightMotor(SEARCH_SPEED_BWD - 1);
-      
-      if (currentMillis - searchPatternTimer >= BACKWARD_TIME) {
-        searchPatternState = 2;
-        searchPatternTimer = currentMillis;
-      }
-    }
-    else if (searchPatternState == 2) { // Turn phase
-      setLeftMotor(SEARCH_SPEED_FWD);
-      setRightMotor(SEARCH_SPEED_BWD);
-      
-      if (currentMillis - searchPatternTimer >= TURN_TIME) {
-        searchPatternState = 0;
-        searchPatternTimer = currentMillis;
-      }
-    }
-    
-    break;
-  }
-   case 1: { // Opponent at back
-    // Faster backward attack with slight direction bias based on last attack
-    if (lastOpponentState == 2) { // If opponent was recently at left
-      setLeftMotor(SEARCH_SPEED_BWD - 5); // Turn more sharply
-      setRightMotor(SEARCH_SPEED_BWD + 5);
-    } else if (lastOpponentState == 4) { // If opponent was recently at right
-      setLeftMotor(SEARCH_SPEED_BWD + 5);
-      setRightMotor(SEARCH_SPEED_BWD - 5); // Turn more sharply
-    } else {
-      // Faster backward attack
-      setLeftMotor(SEARCH_SPEED_BWD - 10); // More speed (lower value = faster backward)
-      setRightMotor(SEARCH_SPEED_BWD - 10);
-    }
-    logStateChange("Attacking backward", IRValues[0], lastIRValues[0]);
-    break;
-  }
-  case 2: { // Opponent at left
-    // More aggressive left turn with initial burst
-
-    setLeftMotor(SEARCH_SPEED_BWD); // Higher backward speed
-    setRightMotor(SEARCH_SPEED_FWD + 2); // Higher forward speed
-    logStateChange("Attacking left", IRValues[1], lastIRValues[1]);
-    break;
-  }
-  case 3: { // Opponent at center
-    // Optimize frontal attack with directional bias based on which sensors are active
-    if (IRValues[2] && !IRValues[4]) {
-      // Opponent slightly left of center - adjust trajectory
-      setLeftMotor(SEARCH_SPEED_FWD + 15);
-      setRightMotor(SEARCH_SPEED_FWD + 20); // Right motor faster to turn slightly left
-    } else if (!IRValues[2] && IRValues[4]) {
-      // Opponent slightly right of center - adjust trajectory
-      setLeftMotor(SEARCH_SPEED_FWD + 25); // Left motor faster to turn slightly right
-      setRightMotor(SEARCH_SPEED_FWD + 20);
-    } else {
-      // Direct center attack with max speed
-      setLeftMotor(SEARCH_SPEED_FWD + 30); // Much higher speed
-      setRightMotor(SEARCH_SPEED_FWD + 30);
-    }
-    logStateChange("Attacking center",
-                  (IRValues[2] || IRValues[3] || IRValues[4]),
-                  (lastIRValues[2] || lastIRValues[3] || lastIRValues[4]));
-    break;
-  }
-  case 4: { // Opponent at right
-    // More aggressive right turn with initial burst
-    setLeftMotor(SEARCH_SPEED_FWD + 4); // Higher forward speed
-    setRightMotor(SEARCH_SPEED_BWD); // Higher backward speed
-    logStateChange("Attacking right", IRValues[5], lastIRValues[5]);
-    break;
-  }
-}
-
-// Update last opponent state for next loop
-lastOpponentState = opponentState;
-
-
-// setLeftMotor(SEARCH_SPEED_FWD);
-// setRightMotor(SEARCH_SPEED_FWD - 1);
-
-// setLeftMotor(SEARCH_SPEED_BWD);
-// setRightMotor(SEARCH_SPEED_BWD - 1);
-
-
+  mainFUNC();
 }
 
 /*===== HELPER FUNCTIONS =====*/
@@ -333,4 +239,316 @@ void printImportantInfo(uint16_t sensorValue[], int IRValues[])
     Serial.print(" ");
   }
   Serial.println();
+
+  Serial.print("Motor temps: ");
+  Serial.print(analogRead(TMP_1));
+  Serial.print(" ");
+
+  Serial.println();
+}
+
+void mainFUNC()
+{
+  unsigned long currentMillis = millis();
+
+  // Temperature safety check - runs every 1 second
+  if (currentMillis - lastTempCheckTime >= TEMP_CHECK_INTERVAL)
+  {
+    lastTempCheckTime = currentMillis;
+
+    // Read both temperature sensors
+    int tempValue1 = analogRead(TMP_1);
+    int tempValue2 = analogRead(TMP_2);
+    float temp1 = mapTemperature(tempValue1);
+    float temp2 = mapTemperature(tempValue2);
+
+    // Log current temperatures
+    Serial.print("TEMP CHECK: ");
+    Serial.print(temp1);
+    Serial.print("°C, ");
+    Serial.print(temp2);
+    Serial.println("°C");
+
+    // Safety cutoff - if either temperature exceeds threshold
+    if (temp1 > 70.0 || temp2 > 70.0)
+    {
+      // Emergency stop
+      stopMotors();
+      Serial.println("!!! EMERGENCY STOP - MOTOR OVERHEATING !!!");
+      // Break out of the main function
+      return;
+    }
+  }
+
+  // Enable edge detection - using non-blocking approach
+  uint16_t sensorValue[SensorCount];
+  // qtr.read(sensorValue, QTRReadMode::On);
+
+  // Check for ring edge (highest priority)
+  // if (sensorValue[0] < EDGE_THRESHOLD || sensorValue[3] < EDGE_THRESHOLD)
+  // {
+  //   // Edge detected - back up and turn away
+  //   static unsigned long edgeTimer = 0;
+  //   static int edgeState = 0;
+
+  //   if (edgeState == 0)
+  //   {
+  //     // Start backup
+  //     setLeftMotor(RETREAT_SPEED_BWD - 5); // Faster retreat
+  //     setRightMotor(RETREAT_SPEED_BWD - 5);
+  //     edgeTimer = currentMillis;
+  //     edgeState = 1;
+  //     logMessage("EDGE DETECTED - RETREATING");
+  //   }
+  //   else if (edgeState == 1 && currentMillis - edgeTimer >= 200)
+  //   {
+  //     // Start turn
+  //     setLeftMotor(RETREAT_SPEED_BWD - 10);
+  //     setRightMotor(RETREAT_SPEED_FWD + 10);
+  //     edgeTimer = currentMillis;
+  //     edgeState = 2;
+  //   }
+  //   else if (edgeState == 2 && currentMillis - edgeTimer >= 150)
+  //   {
+  //     // Reset state for next edge detection
+  //     edgeState = 0;
+  //   }
+
+  //   // Skip rest of logic while handling edge
+  //   return;
+  // }
+
+  // Read IR sensors with debouncing for more reliable detection
+  int IRValues[IRCount] = {0};
+  for (int i = 0; i < IRCount; i++)
+  {
+    int rawValue = digitalRead(IRPins[i]);
+
+    // Debounce readings
+    if (rawValue == 1)
+    {
+      IRConfirmedCount[i]++;
+      if (IRConfirmedCount[i] >= IR_DEBOUNCE_COUNT)
+      {
+        IRValues[i] = 1;
+      }
+    }
+    else
+    {
+      IRConfirmedCount[i] = 0;
+      IRValues[i] = 0;
+    }
+
+    // Serial.print(IRValues[i]);
+    // Serial.print(" ");
+  }
+  // Serial.println();
+
+  // Determine opponent position (0=none, 1=back, 2=left, 3=center, 4=right)
+  int opponentState = 0;
+  if (IRValues[0] == 1)
+    opponentState = 1; // Back
+  else if (IRValues[1] == 1)
+    opponentState = 2; // Left
+  else if (IRValues[2] == 1 || IRValues[3] == 1 || IRValues[4] == 1)
+    opponentState = 3; // Center
+  else if (IRValues[5] == 1)
+    opponentState = 4; // Right
+
+  // Reset state entry timer if state changed
+  if (opponentState != lastOpponentState)
+  {
+    stateEntryTime = currentMillis;
+  }
+
+  // Check if stuck in a state too long - reset if needed
+  if (currentMillis - stateEntryTime > MAX_STATE_TIME)
+  {
+    // Force a state change if stuck too long
+    backAttackState = 0;
+    searchPatternState = 0;
+    stateEntryTime = currentMillis;
+    // logMessage("WARNING: Reset due to state timeout");
+  }
+
+  // React based on opponent position
+  switch (opponentState)
+  {
+  case 0:
+  { // No opponent - search pattern
+    // Reset search state if we just lost track of opponent
+    if (lastOpponentState != 0)
+    {
+      searchPatternState = 0;
+      searchPatternTimer = currentMillis;
+    }
+
+    // State machine for search pattern
+    if (searchPatternState == 0)
+    {                                      // Forward phase
+      setLeftMotor(SEARCH_SPEED_FWD + 5);  // Slightly faster
+      setRightMotor(SEARCH_SPEED_FWD + 3); // Slight curve to search more area
+
+      if (currentMillis - searchPatternTimer >= FORWARD_TIME)
+      {
+        searchPatternState = 1;
+        searchPatternTimer = currentMillis;
+      }
+    }
+    else if (searchPatternState == 1)
+    {                                     // Backward phase
+      setLeftMotor(SEARCH_SPEED_BWD - 3); // Slightly faster
+      setRightMotor(SEARCH_SPEED_BWD);    // Slight curve for better coverage
+
+      if (currentMillis - searchPatternTimer >= BACKWARD_TIME)
+      {
+        searchPatternState = 2;
+        searchPatternTimer = currentMillis;
+      }
+    }
+    else if (searchPatternState == 2)
+    {                                       // Turn phase - wider turn
+      setLeftMotor(SEARCH_SPEED_FWD + 10);  // Faster spin
+      setRightMotor(SEARCH_SPEED_BWD - 10); // Faster spin
+
+      if (currentMillis - searchPatternTimer >= TURN_TIME + 10)
+      { // Slightly longer turn
+        searchPatternState = 0;
+        searchPatternTimer = currentMillis;
+      }
+    }
+    break;
+  }
+
+  case 1:
+  { // Opponent at back - optimized 180° turn
+    unsigned long currentMillis = millis();
+
+    // If we just detected opponent at back
+    if (lastOpponentState != 1)
+    {
+      backAttackState = 0;
+      backAttackTimer = currentMillis;
+      // Start with a quick reverse
+      setLeftMotor(SEARCH_SPEED_BWD - 5);
+      setRightMotor(SEARCH_SPEED_BWD - 5);
+      logMessage("Back opponent - turning 180°");
+    }
+    else
+    {
+      // Simple state machine with just turn and attack
+      if (backAttackState == 0 && currentMillis - backAttackTimer >= 100)
+      {
+        // After brief backup, start the 180° turn - more precise speed values
+        setLeftMotor(SEARCH_SPEED_FWD + TURN_SPEED_AGGRESSIVE);
+        setRightMotor(SEARCH_SPEED_BWD - TURN_SPEED_AGGRESSIVE);
+        backAttackState = 1;
+        backAttackTimer = currentMillis;
+      }
+      else if (backAttackState == 1 && currentMillis - backAttackTimer >= BACK_TURN_TIME)
+      {
+        // Turn complete - just go forward, with a brief stabilization period
+        setLeftMotor(ATTACK_SPEED_FWD); // Slightly reduced speed during transition
+        setRightMotor(ATTACK_SPEED_FWD);
+        backAttackState = 2;
+        backAttackTimer = currentMillis;
+      }
+      else if (backAttackState == 2 && currentMillis - backAttackTimer >= 50)
+      {
+        // After brief stabilization, full speed ahead
+        setLeftMotor(ATTACK_SPEED_FWD + 15);
+        setRightMotor(ATTACK_SPEED_FWD + 15);
+        backAttackState = 3;
+      }
+      else if (backAttackState == 3)
+      {
+        // Keep going forward at full speed
+        setLeftMotor(ATTACK_SPEED_FWD + 15);
+        setRightMotor(ATTACK_SPEED_FWD + 15);
+      }
+    }
+    break;
+  }
+
+  case 2:
+  { // Opponent at left - more precise turning
+    // More gradual turn with slightly reduced differential
+    setLeftMotor(SEARCH_SPEED_BWD - TURN_SPEED_MODERATE);
+    setRightMotor(ATTACK_SPEED_FWD + TURN_SPEED_MODERATE);
+
+    // If we just detected the opponent on the left
+    if (lastOpponentState != 2)
+    {
+      stabilizingTurn = true;
+      turnStabilizeTimer = currentMillis;
+    }
+
+    // Add a stabilization phase to prevent overturning
+    if (stabilizingTurn && currentMillis - turnStabilizeTimer >= 150)
+    {
+      stabilizingTurn = false;
+    }
+
+    logStateChange("Attacking left", IRValues[1], lastIRValues[1]);
+    break;
+  }
+
+  case 3:
+  { // Opponent at center - more precise directional control
+    if (IRValues[2] && !IRValues[4])
+    {
+      // Opponent slightly left of center - gentler turn
+      setLeftMotor(ATTACK_SPEED_FWD + 5);
+      setRightMotor(ATTACK_SPEED_FWD + 15); // Reduced differential
+    }
+    else if (!IRValues[2] && IRValues[4])
+    {
+      // Opponent slightly right of center - gentler turn
+      setLeftMotor(ATTACK_SPEED_FWD + 15); // Reduced differential
+      setRightMotor(ATTACK_SPEED_FWD + 5);
+    }
+    else
+    {
+      // Direct center attack with balanced speed
+      setLeftMotor(ATTACK_SPEED_FWD + 25);
+      setRightMotor(ATTACK_SPEED_FWD + 25);
+    }
+    logStateChange("Attacking center",
+                   (IRValues[2] || IRValues[3] || IRValues[4]),
+                   (lastIRValues[2] || lastIRValues[3] || lastIRValues[4]));
+    break;
+  }
+
+  case 4:
+  { // Opponent at right - more precise turning
+    // More gradual turn with slightly reduced differential
+    setLeftMotor(ATTACK_SPEED_FWD + TURN_SPEED_MODERATE);
+    setRightMotor(SEARCH_SPEED_BWD - TURN_SPEED_MODERATE);
+
+    // If we just detected the opponent on the right
+    if (lastOpponentState != 4)
+    {
+      stabilizingTurn = true;
+      turnStabilizeTimer = currentMillis;
+    }
+
+    // Add a stabilization phase to prevent overturning
+    if (stabilizingTurn && currentMillis - turnStabilizeTimer >= 150)
+    {
+      stabilizingTurn = false;
+    }
+
+    logStateChange("Attacking right", IRValues[5], lastIRValues[5]);
+    break;
+  }
+  }
+
+  // Update last opponent state for next loop
+  lastOpponentState = opponentState;
+
+  // Update IR values for next comparison
+  for (int i = 0; i < IRCount; i++)
+  {
+    lastIRValues[i] = IRValues[i];
+  }
 }
