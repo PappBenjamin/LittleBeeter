@@ -32,8 +32,8 @@ int SensorCount = 4;
 /*===== MOVEMENT SETTINGS =====*/
 // Motor speeds (0-255, 128 is stop)
 #define STOP_SPEED 128
-#define ATTACK_SPEED_FWD 160  // Forward attack
-#define ATTACK_SPEED_BWD 96   // Backward attack
+#define ATTACK_SPEED_FWD 146  // Forward attack
+#define ATTACK_SPEED_BWD 110  // Backward attack
 #define RETREAT_SPEED_FWD 140 // Forward retreat
 #define RETREAT_SPEED_BWD 116 // Backward retreat
 #define SEARCH_SPEED_FWD 146  // Forward search
@@ -189,7 +189,6 @@ void loop()
 {
 
   mainFUNC();
-
 }
 
 /*===== HELPER FUNCTIONS =====*/
@@ -412,56 +411,39 @@ void mainFUNC()
   }
 
   case 1:
-  { // Opponent at back 
-    // If we just detected opponent at back, initialize turn
+  { // Opponent at back - very simple 180° turn then forward
+    unsigned long currentMillis = millis();
+
+    // If we just detected opponent at back
     if (lastOpponentState != 1)
     {
       backAttackState = 0;
       backAttackTimer = currentMillis;
-
-      // Start with brief reverse to gain space
-      setLeftMotor(SEARCH_SPEED_BWD - 5);
-      setRightMotor(SEARCH_SPEED_BWD - 5);
-
-      logMessage("Detected opponent at back - preparing 180° turn");
+      logMessage("Back opponent - turning 180°");
     }
     else
     {
-      // State machine for back opponent handling
-      if (backAttackState == 0 && currentMillis - backAttackTimer >= 75)
+      // Simple state machine with just turn and attack
+      if (backAttackState == 0 && currentMillis - backAttackTimer >= 100)
       {
-        // After brief reverse, start fast 180° turn
-        setLeftMotor(SEARCH_SPEED_FWD + 15);  // Faster turn
-        setRightMotor(SEARCH_SPEED_BWD - 15); // Faster turn
+        // After brief backup, start the 180° turn
+        setLeftMotor(SEARCH_SPEED_FWD + 15);  // Left forward
+        setRightMotor(SEARCH_SPEED_BWD - 15); // Right backward
         backAttackState = 1;
         backAttackTimer = currentMillis;
-        logMessage("Starting 180° turn");
-      }
-      else if (backAttackState == 0)
-      {
-        // Still in initial reverse
-        setLeftMotor(SEARCH_SPEED_BWD - 5);
-        setRightMotor(SEARCH_SPEED_BWD - 5);
       }
       else if (backAttackState == 1 && currentMillis - backAttackTimer >= 350)
       {
-        // Turn complete - attack at full speed
-        setLeftMotor(ATTACK_SPEED_FWD + 20);
-        setRightMotor(ATTACK_SPEED_FWD + 20);
+        // Turn complete - just go forward
+        setLeftMotor(ATTACK_SPEED_FWD + 15);
+        setRightMotor(ATTACK_SPEED_FWD + 15);
         backAttackState = 2;
-        logMessage("Turn complete - attacking");
-      }
-      else if (backAttackState == 1)
-      {
-        // Still turning
-        setLeftMotor(SEARCH_SPEED_FWD + 15);
-        setRightMotor(SEARCH_SPEED_BWD - 15);
       }
       else if (backAttackState == 2)
       {
-        // Continue attack
-        setLeftMotor(ATTACK_SPEED_FWD + 20);
-        setRightMotor(ATTACK_SPEED_FWD + 20);
+        // Keep going forward
+        setLeftMotor(ATTACK_SPEED_FWD + 15);
+        setRightMotor(ATTACK_SPEED_FWD + 15);
       }
     }
     break;
@@ -470,7 +452,7 @@ void mainFUNC()
   case 2:
   {                                       // Opponent at left - more aggressive turn
     setLeftMotor(SEARCH_SPEED_BWD - 10);  // Faster backward
-    setRightMotor(ATTACK_SPEED_FWD + 15); // Faster forward
+    setRightMotor(ATTACK_SPEED_FWD + 11); // Faster forward
     logStateChange("Attacking left", IRValues[1], lastIRValues[1]);
     break;
   }
@@ -503,7 +485,7 @@ void mainFUNC()
 
   case 4:
   {                                       // Opponent at right - more aggressive turn
-    setLeftMotor(ATTACK_SPEED_FWD + 15);  // Faster forward
+    setLeftMotor(ATTACK_SPEED_FWD + 11);  // Faster forward
     setRightMotor(SEARCH_SPEED_BWD - 10); // Faster backward
     logStateChange("Attacking right", IRValues[5], lastIRValues[5]);
     break;
