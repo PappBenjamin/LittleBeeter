@@ -35,6 +35,11 @@ struct SensorData {
   uint16_t qtrValues[SensorCount];
   int irValues[IRCount];
   bool edgeDetected;
+  // Add temperature data
+  float motorTemp1;
+  float motorTemp2;
+  // Add IR debounce counters
+  int irConfirmedCount[IRCount];
 };
 SensorData sensorData;
 
@@ -52,6 +57,10 @@ struct StateData {
   int searchPatternState;
   unsigned long searchPatternTimer;
   bool robotStarted;
+  // Add these new state variables
+  int backAttackState;
+  unsigned long backAttackTimer;
+  unsigned long stateEntryTime;
 };
 StateData stateData;
 
@@ -66,6 +75,8 @@ void setRightMotor(int speed);
 void stopMotors();
 void logMessage(const char *message);
 void logStateChange(const char *message, int newState, int oldState);
+float mapTemperature(int analogValue);
+void printTemperatureInfo();
 
 void setup() {
   // Initialize serial communication
@@ -101,6 +112,10 @@ void setup() {
   setupPWM(PWM_left, slice_left);
   setupPWM(PWM_right, slice_right);
   
+  // Configure temperature sensors
+  pinMode(TMP_1, INPUT);
+  pinMode(TMP_2, INPUT);
+  
   // Initialize shared data structures
   sensorData.edgeDetected = false;
   for (int i = 0; i < SensorCount; i++) {
@@ -118,6 +133,14 @@ void setup() {
   stateData.searchPatternState = 0;
   stateData.searchPatternTimer = 0;
   stateData.robotStarted = false;
+  stateData.backAttackState = 0;
+  stateData.backAttackTimer = 0;
+  stateData.stateEntryTime = 0;
+
+  // Initialize IR debounce counters
+  for (int i = 0; i < IRCount; i++) {
+    sensorData.irConfirmedCount[i] = 0;
+  }
 
   // Create mutexes
   sensorMutex = xSemaphoreCreateMutex();
@@ -198,16 +221,69 @@ void loop() {
 // Task to read sensors and update shared sensor data
 void SensorTask(void *pvParameters) {
   TickType_t xLastWakeTime = xTaskGetTickCount();
+  unsigned long lastTempCheckTime = 0;
   
   for (;;) {
+    // Get current time
+    unsigned long currentMillis = millis();
+    
     // Read QTR sensors
     uint16_t qtrValues[SensorCount];
     qtr.read(qtrValues);
     
-    // Read IR sensors
-    int irValues[IRCount];
+    // Read IR sensors with debouncing
+    int rawIrValues[IRCount];
+    int debouncedIrValues[IRCount];
+    
     for (int i = 0; i < IRCount; i++) {
-      irValues[i] = digitalRead(IRPins[i]);
+      rawIrValues[i] = digitalRead(IRPins[i]);
+      
+      // Apply debouncing logic
+      if (xSemaphoreTake(sensorMutex, portMAX_DELAY) == pdTRUE) {
+        if (rawIrValues[i] == 1) {
+          sensorData.irConfirmedCount[i]++;
+          if (sensorData.irConfirmedCount[i] >= IR_DEBOUNCE_COUNT) {
+            debouncedIrValues[i] = 1;
+          } else {
+            debouncedIrValues[i] = 0;
+          }
+        } else {
+          sensorData.irConfirmedCount[i] = 0;
+          debouncedIrValues[i] = 0;
+        }
+        xSemaphoreGive(sensorMutex);
+      }
+    }
+    
+    // Temperature safety check - runs every TEMP_CHECK_INTERVAL
+    if (currentMillis - lastTempCheckTime >= TEMP_CHECK_INTERVAL) {
+      lastTempCheckTime = currentMillis;
+      
+      // Read temperature sensors
+      int tempValue1 = analogRead(TMP_1);
+      int tempValue2 = analogRead(TMP_2);
+      float temp1 = mapTemperature(tempValue1);
+      float temp2 = mapTemperature(tempValue2);
+      
+      // Update shared sensor data with temperature values
+      if (xSemaphoreTake(sensorMutex, portMAX_DELAY) == pdTRUE) {
+        sensorData.motorTemp1 = temp1;
+        sensorData.motorTemp2 = temp2;
+        xSemaphoreGive(sensorMutex);
+      }
+      
+      // Safety cutoff - if either temperature exceeds threshold
+      if (temp1 > MAX_TEMP_THRESHOLD || temp2 > MAX_TEMP_THRESHOLD) {
+        // Emergency stop via motor commands
+        if (xSemaphoreTake(motorMutex, portMAX_DELAY) == pdTRUE) {
+          motorCommands.leftSpeed = STOP_SPEED;
+          motorCommands.rightSpeed = STOP_SPEED;
+          xSemaphoreGive(motorMutex);
+        }
+        
+        // Log the emergency stop
+        Serial.println("!!! EMERGENCY STOP - MOTOR OVERHEATING !!!");
+      }
     }
     
     // Determine if edge detected
@@ -225,7 +301,7 @@ void SensorTask(void *pvParameters) {
         sensorData.qtrValues[i] = qtrValues[i];
       }
       for (int i = 0; i < IRCount; i++) {
-        sensorData.irValues[i] = irValues[i];
+        sensorData.irValues[i] = debouncedIrValues[i];
       }
       sensorData.edgeDetected = edgeDetected;
       
@@ -271,8 +347,13 @@ void DecisionTask(void *pvParameters) {
   int lastOpponentState = -1;
   int searchPatternState = 0;
   unsigned long searchPatternTimer = 0;
+  int backAttackState = 0;
+  unsigned long backAttackTimer = 0;
+  unsigned long stateEntryTime = 0;
   
   for (;;) {
+    unsigned long currentMillis = millis();
+    
     // First check if robot should be active
     if (xSemaphoreTake(stateMutex, portMAX_DELAY) == pdTRUE) {
       robotActive = stateData.robotStarted;
@@ -299,14 +380,25 @@ void DecisionTask(void *pvParameters) {
       lastOpponentState = stateData.lastOpponentState;
       searchPatternState = stateData.searchPatternState;
       searchPatternTimer = stateData.searchPatternTimer;
+      backAttackState = stateData.backAttackState;
+      backAttackTimer = stateData.backAttackTimer;
+      stateEntryTime = stateData.stateEntryTime;
       xSemaphoreGive(stateMutex);
+    }
+    
+    // Check if stuck in a state too long - reset if needed
+    if (currentMillis - stateEntryTime > MAX_STATE_TIME) {
+      // Force a state change if stuck too long
+      backAttackState = 0;
+      searchPatternState = 0;
+      stateEntryTime = currentMillis;
     }
     
     // 1. Edge detection (highest priority)
     if (edgeDetected) {
       if (xSemaphoreTake(motorMutex, portMAX_DELAY) == pdTRUE) {
-        motorCommands.leftSpeed = RETREAT_SPEED_BWD;
-        motorCommands.rightSpeed = RETREAT_SPEED_BWD;
+        motorCommands.leftSpeed = RETREAT_SPEED_BWD - 5; // Faster retreat
+        motorCommands.rightSpeed = RETREAT_SPEED_BWD - 5;
         xSemaphoreGive(motorMutex);
       }
       
@@ -314,8 +406,8 @@ void DecisionTask(void *pvParameters) {
       vTaskDelay(pdMS_TO_TICKS(200));
       
       if (xSemaphoreTake(motorMutex, portMAX_DELAY) == pdTRUE) {
-        motorCommands.leftSpeed = RETREAT_SPEED_BWD;
-        motorCommands.rightSpeed = RETREAT_SPEED_FWD;
+        motorCommands.leftSpeed = RETREAT_SPEED_BWD - 10; // More aggressive turn
+        motorCommands.rightSpeed = RETREAT_SPEED_FWD + 10;
         xSemaphoreGive(motorMutex);
       }
       
@@ -339,11 +431,14 @@ void DecisionTask(void *pvParameters) {
       opponentState = 4; // Right
     }
     
+    // Reset state entry timer if state changed
+    if (opponentState != lastOpponentState) {
+      stateEntryTime = currentMillis;
+    }
+    
     // 3. React based on opponent position
     switch (opponentState) {
       case 0: { // No opponent - search pattern
-        unsigned long currentMillis = millis();
-        
         // Reset search state if we just lost track of opponent
         if (lastOpponentState != 0) {
           searchPatternState = 0;
@@ -353,8 +448,8 @@ void DecisionTask(void *pvParameters) {
         // State machine for search pattern
         if (searchPatternState == 0) { // Forward phase
           if (xSemaphoreTake(motorMutex, portMAX_DELAY) == pdTRUE) {
-            motorCommands.leftSpeed = SEARCH_SPEED_FWD;
-            motorCommands.rightSpeed = SEARCH_SPEED_FWD - 1;
+            motorCommands.leftSpeed = SEARCH_SPEED_FWD + 5;  // Slightly faster
+            motorCommands.rightSpeed = SEARCH_SPEED_FWD + 3; // Slight curve to search more area
             xSemaphoreGive(motorMutex);
           }
           
@@ -365,8 +460,8 @@ void DecisionTask(void *pvParameters) {
         }
         else if (searchPatternState == 1) { // Backward phase
           if (xSemaphoreTake(motorMutex, portMAX_DELAY) == pdTRUE) {
-            motorCommands.leftSpeed = SEARCH_SPEED_BWD;
-            motorCommands.rightSpeed = SEARCH_SPEED_BWD - 1;
+            motorCommands.leftSpeed = SEARCH_SPEED_BWD - 3; // Slightly faster
+            motorCommands.rightSpeed = SEARCH_SPEED_BWD;    // Slight curve for better coverage
             xSemaphoreGive(motorMutex);
           }
           
@@ -375,14 +470,14 @@ void DecisionTask(void *pvParameters) {
             searchPatternTimer = currentMillis;
           }
         }
-        else if (searchPatternState == 2) { // Turn phase
+        else if (searchPatternState == 2) { // Turn phase - wider turn
           if (xSemaphoreTake(motorMutex, portMAX_DELAY) == pdTRUE) {
-            motorCommands.leftSpeed = SEARCH_SPEED_FWD;
-            motorCommands.rightSpeed = SEARCH_SPEED_BWD;
+            motorCommands.leftSpeed = SEARCH_SPEED_FWD + 10;  // Faster spin
+            motorCommands.rightSpeed = SEARCH_SPEED_BWD - 10; // Faster spin
             xSemaphoreGive(motorMutex);
           }
           
-          if (currentMillis - searchPatternTimer >= TURN_TIME) {
+          if (currentMillis - searchPatternTimer >= TURN_TIME + 10) { // Slightly longer turn
             searchPatternState = 0;
             searchPatternTimer = currentMillis;
           }
@@ -390,32 +485,76 @@ void DecisionTask(void *pvParameters) {
         break;
       }
       
-      case 1: { // Opponent at back
-        if (xSemaphoreTake(motorMutex, portMAX_DELAY) == pdTRUE) {
-          // Faster backward attack with slight direction bias based on last attack
-          if (lastOpponentState == 2) { // If opponent was recently at left
-            motorCommands.leftSpeed = ATTACK_SPEED_BWD - 10; // Turn more sharply
-            motorCommands.rightSpeed = ATTACK_SPEED_BWD + 5;
-          } else if (lastOpponentState == 4) { // If opponent was recently at right
-            motorCommands.leftSpeed = ATTACK_SPEED_BWD + 5;
-            motorCommands.rightSpeed = ATTACK_SPEED_BWD - 10; // Turn more sharply
-          } else {
-            // Faster backward attack
-            motorCommands.leftSpeed = ATTACK_SPEED_BWD - 10; // More speed (lower value = faster backward)
-            motorCommands.rightSpeed = ATTACK_SPEED_BWD - 10;
+      case 1: { // Opponent at back - improved state machine
+        // If we just detected opponent at back, initialize turn
+        if (lastOpponentState != 1) {
+          backAttackState = 0;
+          backAttackTimer = currentMillis;
+          
+          if (xSemaphoreTake(motorMutex, portMAX_DELAY) == pdTRUE) {
+            // Start with brief reverse to gain space
+            motorCommands.leftSpeed = SEARCH_SPEED_BWD - 5;
+            motorCommands.rightSpeed = SEARCH_SPEED_BWD - 5;
+            xSemaphoreGive(motorMutex);
           }
-          xSemaphoreGive(motorMutex);
+          
+          logMessage("Detected opponent at back - preparing 180° turn");
         }
-        
-        logStateChange("Attacking backward", irValues[0], (lastOpponentState == 1) ? 1 : 0);
+        else {
+          // State machine for back opponent handling
+          if (backAttackState == 0 && currentMillis - backAttackTimer >= BACK_ATTACK_REVERSE_TIME) {
+            // After brief reverse, start fast 180° turn
+            if (xSemaphoreTake(motorMutex, portMAX_DELAY) == pdTRUE) {
+              motorCommands.leftSpeed = SEARCH_SPEED_FWD + 15;  // Faster turn
+              motorCommands.rightSpeed = SEARCH_SPEED_BWD - 15; // Faster turn
+              xSemaphoreGive(motorMutex);
+            }
+            backAttackState = 1;
+            backAttackTimer = currentMillis;
+            logMessage("Starting 180° turn");
+          }
+          else if (backAttackState == 0) {
+            // Still in initial reverse
+            if (xSemaphoreTake(motorMutex, portMAX_DELAY) == pdTRUE) {
+              motorCommands.leftSpeed = SEARCH_SPEED_BWD - 5;
+              motorCommands.rightSpeed = SEARCH_SPEED_BWD - 5;
+              xSemaphoreGive(motorMutex);
+            }
+          }
+          else if (backAttackState == 1 && currentMillis - backAttackTimer >= BACK_ATTACK_TURN_TIME) {
+            // Turn complete - attack at full speed
+            if (xSemaphoreTake(motorMutex, portMAX_DELAY) == pdTRUE) {
+              motorCommands.leftSpeed = ATTACK_SPEED_FWD + 20;
+              motorCommands.rightSpeed = ATTACK_SPEED_FWD + 20;
+              xSemaphoreGive(motorMutex);
+            }
+            backAttackState = 2;
+            logMessage("Turn complete - attacking");
+          }
+          else if (backAttackState == 1) {
+            // Still turning
+            if (xSemaphoreTake(motorMutex, portMAX_DELAY) == pdTRUE) {
+              motorCommands.leftSpeed = SEARCH_SPEED_FWD + 15;
+              motorCommands.rightSpeed = SEARCH_SPEED_BWD - 15;
+              xSemaphoreGive(motorMutex);
+            }
+          }
+          else if (backAttackState == 2) {
+            // Continue attack
+            if (xSemaphoreTake(motorMutex, portMAX_DELAY) == pdTRUE) {
+              motorCommands.leftSpeed = ATTACK_SPEED_FWD + 20;
+              motorCommands.rightSpeed = ATTACK_SPEED_FWD + 20;
+              xSemaphoreGive(motorMutex);
+            }
+          }
+        }
         break;
       }
       
-      case 2: { // Opponent at left
+      case 2: { // Opponent at left - more aggressive turn
         if (xSemaphoreTake(motorMutex, portMAX_DELAY) == pdTRUE) {
-          // More aggressive left turn with initial burst
-          motorCommands.leftSpeed = ATTACK_SPEED_BWD - 10; // Higher backward speed
-          motorCommands.rightSpeed = ATTACK_SPEED_FWD + 15; // Higher forward speed
+          motorCommands.leftSpeed = SEARCH_SPEED_BWD - 10;  // Faster backward
+          motorCommands.rightSpeed = ATTACK_SPEED_FWD + 15; // Faster forward
           xSemaphoreGive(motorMutex);
         }
         
@@ -423,21 +562,20 @@ void DecisionTask(void *pvParameters) {
         break;
       }
       
-      case 3: { // Opponent at center
+      case 3: { // Opponent at center - improved directional attack
         if (xSemaphoreTake(motorMutex, portMAX_DELAY) == pdTRUE) {
-          // Optimize frontal attack with directional bias based on which sensors are active
           if (irValues[2] && !irValues[4]) {
-            // Opponent slightly left of center - adjust trajectory
-            motorCommands.leftSpeed = ATTACK_SPEED_FWD + 15;
-            motorCommands.rightSpeed = ATTACK_SPEED_FWD + 25; // Right motor faster to turn slightly left
+            // Opponent slightly left of center
+            motorCommands.leftSpeed = ATTACK_SPEED_FWD + 10;
+            motorCommands.rightSpeed = ATTACK_SPEED_FWD + 30; // More aggressive turn
           } else if (!irValues[2] && irValues[4]) {
-            // Opponent slightly right of center - adjust trajectory
-            motorCommands.leftSpeed = ATTACK_SPEED_FWD + 25; // Left motor faster to turn slightly right
-            motorCommands.rightSpeed = ATTACK_SPEED_FWD + 15;
+            // Opponent slightly right of center
+            motorCommands.leftSpeed = ATTACK_SPEED_FWD + 30; // More aggressive turn
+            motorCommands.rightSpeed = ATTACK_SPEED_FWD + 10;
           } else {
             // Direct center attack with max speed
-            motorCommands.leftSpeed = ATTACK_SPEED_FWD + 30; // Much higher speed
-            motorCommands.rightSpeed = ATTACK_SPEED_FWD + 30;
+            motorCommands.leftSpeed = ATTACK_SPEED_FWD + 40; // Maximum attack speed
+            motorCommands.rightSpeed = ATTACK_SPEED_FWD + 40;
           }
           xSemaphoreGive(motorMutex);
         }
@@ -448,11 +586,10 @@ void DecisionTask(void *pvParameters) {
         break;
       }
       
-      case 4: { // Opponent at right
+      case 4: { // Opponent at right - more aggressive turn
         if (xSemaphoreTake(motorMutex, portMAX_DELAY) == pdTRUE) {
-          // More aggressive right turn with initial burst
-          motorCommands.leftSpeed = ATTACK_SPEED_FWD + 15; // Higher forward speed
-          motorCommands.rightSpeed = ATTACK_SPEED_BWD - 10; // Higher backward speed
+          motorCommands.leftSpeed = ATTACK_SPEED_FWD + 15;  // Faster forward
+          motorCommands.rightSpeed = SEARCH_SPEED_BWD - 10; // Faster backward
           xSemaphoreGive(motorMutex);
         }
         
@@ -467,6 +604,9 @@ void DecisionTask(void *pvParameters) {
       stateData.opponentState = opponentState;
       stateData.searchPatternState = searchPatternState;
       stateData.searchPatternTimer = searchPatternTimer;
+      stateData.backAttackState = backAttackState;
+      stateData.backAttackTimer = backAttackTimer;
+      stateData.stateEntryTime = stateEntryTime;
       xSemaphoreGive(stateMutex);
     }
     
@@ -549,4 +689,40 @@ void logStateChange(const char *message, int newState, int oldState) {
     Serial.println(message);
     lastSerialOutput = millis();
   }
+}
+
+// Add the temperature mapping function
+float mapTemperature(int analogValue) {
+  // Prevent division by zero or invalid readings
+  if (analogValue <= 0 || analogValue >= 1023)
+    return -10.0;
+
+  // Calculate thermistor resistance using voltage divider formula
+  float resistance = 10000.0 * ((1023.0 / (float)analogValue) - 1.0);
+
+  // Use the B-parameter equation (simplified Steinhart-Hart)
+  float steinhart = log(resistance / 10000.0);
+  steinhart /= 3950.0;
+  steinhart += 1.0 / 298.15;
+  steinhart = 1.0 / steinhart;
+  float celsius = steinhart - 273.15;
+
+  return map(celsius, 50, -50, 24.0, 120.0); // Map to 0-1 range
+}
+
+// Add a function to print temperature values if needed
+void printTemperatureInfo() {
+  float temp1, temp2;
+  
+  if (xSemaphoreTake(sensorMutex, portMAX_DELAY) == pdTRUE) {
+    temp1 = sensorData.motorTemp1;
+    temp2 = sensorData.motorTemp2;
+    xSemaphoreGive(sensorMutex);
+  }
+  
+  Serial.print("Motor temps: ");
+  Serial.print(temp1);
+  Serial.print("°C, ");
+  Serial.print(temp2);
+  Serial.println("°C");
 }

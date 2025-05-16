@@ -10,6 +10,8 @@
 #define PWM_left 11
 #define PWM_right 9
 #define startPin 12 // starter pin
+#define TMP_1 26
+#define TMP_2 27
 
 // IR sensor pins for opponent detection (6 sensors)
 // Arrangement: back, left, front-left, center, front-right, right
@@ -64,5 +66,19 @@ const unsigned int TURN_TIME = 25;      // Turn phase
 
 // Serial output interval
 #define SERIAL_INTERVAL 300       // milliseconds
+
+/*===== TEMPERATURE SENSOR CONFIGURATION =====*/
+#define TEMP_CHECK_INTERVAL 1000  // Check temperature every 1 second
+#define MAX_TEMP_THRESHOLD 70.0   // Maximum safe temperature
+
+/*===== IR DEBOUNCING CONFIGURATION =====*/
+#define IR_DEBOUNCE_COUNT 2  // Number of consecutive readings to confirm detection
+
+/*===== BACK ATTACK STATE MACHINE CONFIGURATION =====*/
+#define BACK_ATTACK_REVERSE_TIME 75
+#define BACK_ATTACK_TURN_TIME 350
+
+/*===== STATE TIMEOUTS =====*/
+#define MAX_STATE_TIME 2000  // Maximum time to spend in any state (ms)
 
 #endif // CONSTANTS_H
