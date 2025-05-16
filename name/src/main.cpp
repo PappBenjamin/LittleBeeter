@@ -39,6 +39,12 @@ int SensorCount = 4;
 #define SEARCH_SPEED_FWD 146  // Forward search
 #define SEARCH_SPEED_BWD 110  // Backward search
 
+// Optimized turning parameters
+#define TURN_SPEED_AGGRESSIVE 15 // For sharp turns
+#define TURN_SPEED_MODERATE 10   // For moderate turns
+#define TURN_SPEED_GENTLE 5      // For gentle turning
+#define BACK_TURN_TIME 300       // Reduced from 350ms for more precise 180° turns
+
 // Search pattern timing (in milliseconds)
 const unsigned int FORWARD_TIME = 250;  // Forward phase
 const unsigned int BACKWARD_TIME = 250; // Backward phase
@@ -81,6 +87,10 @@ unsigned long stateEntryTime = 0;
 // Temperature safety check variables
 unsigned long lastTempCheckTime = 0;
 const unsigned long TEMP_CHECK_INTERVAL = 1000; // Check temperature every 1 second
+
+// Add these to your GLOBAL VARIABLES section
+unsigned long turnStabilizeTimer = 0;
+bool stabilizingTurn = false;
 
 /*===== SETUP FUNCTIONS =====*/
 // Configure PWM on a pin
@@ -175,7 +185,7 @@ float mapTemperature(int analogValue)
 
   // Apply 20°C correction offset
 
-  return map(celsius, 50, -50, 24.0, 120.0); // Map to 0-1 range
+  return map(celsius, 50, -50, 24.0, 120.0) - 10; // Map to 0-1 range
   // return celsius; // Return the temperature in Celsius
 }
 
@@ -252,12 +262,12 @@ void mainFUNC()
     float temp1 = mapTemperature(tempValue1);
     float temp2 = mapTemperature(tempValue2);
 
-    // // Log current temperatures
-    // Serial.print("TEMP CHECK: ");
-    // Serial.print(temp1);
-    // Serial.print("°C, ");
-    // Serial.print(temp2);
-    // Serial.println("°C");
+    // Log current temperatures
+    Serial.print("TEMP CHECK: ");
+    Serial.print(temp1);
+    Serial.print("°C, ");
+    Serial.print(temp2);
+    Serial.println("°C");
 
     // Safety cutoff - if either temperature exceeds threshold
     if (temp1 > 70.0 || temp2 > 70.0)
@@ -329,10 +339,10 @@ void mainFUNC()
       IRValues[i] = 0;
     }
 
-    Serial.print(IRValues[i]);
-    Serial.print(" ");
+    // Serial.print(IRValues[i]);
+    // Serial.print(" ");
   }
-  Serial.println();
+  // Serial.println();
 
   // Determine opponent position (0=none, 1=back, 2=left, 3=center, 4=right)
   int opponentState = 0;
@@ -411,7 +421,7 @@ void mainFUNC()
   }
 
   case 1:
-  { // Opponent at back - very simple 180° turn then forward
+  { // Opponent at back - optimized 180° turn
     unsigned long currentMillis = millis();
 
     // If we just detected opponent at back
@@ -419,6 +429,9 @@ void mainFUNC()
     {
       backAttackState = 0;
       backAttackTimer = currentMillis;
+      // Start with a quick reverse
+      setLeftMotor(SEARCH_SPEED_BWD - 5);
+      setRightMotor(SEARCH_SPEED_BWD - 5);
       logMessage("Back opponent - turning 180°");
     }
     else
@@ -426,22 +439,30 @@ void mainFUNC()
       // Simple state machine with just turn and attack
       if (backAttackState == 0 && currentMillis - backAttackTimer >= 100)
       {
-        // After brief backup, start the 180° turn
-        setLeftMotor(SEARCH_SPEED_FWD + 15);  // Left forward
-        setRightMotor(SEARCH_SPEED_BWD - 15); // Right backward
+        // After brief backup, start the 180° turn - more precise speed values
+        setLeftMotor(SEARCH_SPEED_FWD + TURN_SPEED_AGGRESSIVE);
+        setRightMotor(SEARCH_SPEED_BWD - TURN_SPEED_AGGRESSIVE);
         backAttackState = 1;
         backAttackTimer = currentMillis;
       }
-      else if (backAttackState == 1 && currentMillis - backAttackTimer >= 350)
+      else if (backAttackState == 1 && currentMillis - backAttackTimer >= BACK_TURN_TIME)
       {
-        // Turn complete - just go forward
+        // Turn complete - just go forward, with a brief stabilization period
+        setLeftMotor(ATTACK_SPEED_FWD); // Slightly reduced speed during transition
+        setRightMotor(ATTACK_SPEED_FWD);
+        backAttackState = 2;
+        backAttackTimer = currentMillis;
+      }
+      else if (backAttackState == 2 && currentMillis - backAttackTimer >= 50)
+      {
+        // After brief stabilization, full speed ahead
         setLeftMotor(ATTACK_SPEED_FWD + 15);
         setRightMotor(ATTACK_SPEED_FWD + 15);
-        backAttackState = 2;
+        backAttackState = 3;
       }
-      else if (backAttackState == 2)
+      else if (backAttackState == 3)
       {
-        // Keep going forward
+        // Keep going forward at full speed
         setLeftMotor(ATTACK_SPEED_FWD + 15);
         setRightMotor(ATTACK_SPEED_FWD + 15);
       }
@@ -450,32 +471,47 @@ void mainFUNC()
   }
 
   case 2:
-  {                                       // Opponent at left - more aggressive turn
-    setLeftMotor(SEARCH_SPEED_BWD - 10);  // Faster backward
-    setRightMotor(ATTACK_SPEED_FWD + 11); // Faster forward
+  { // Opponent at left - more precise turning
+    // More gradual turn with slightly reduced differential
+    setLeftMotor(SEARCH_SPEED_BWD - TURN_SPEED_MODERATE);
+    setRightMotor(ATTACK_SPEED_FWD + TURN_SPEED_MODERATE);
+
+    // If we just detected the opponent on the left
+    if (lastOpponentState != 2)
+    {
+      stabilizingTurn = true;
+      turnStabilizeTimer = currentMillis;
+    }
+
+    // Add a stabilization phase to prevent overturning
+    if (stabilizingTurn && currentMillis - turnStabilizeTimer >= 150)
+    {
+      stabilizingTurn = false;
+    }
+
     logStateChange("Attacking left", IRValues[1], lastIRValues[1]);
     break;
   }
 
   case 3:
-  { // Opponent at center - improved directional attack
+  { // Opponent at center - more precise directional control
     if (IRValues[2] && !IRValues[4])
     {
-      // Opponent slightly left of center
-      setLeftMotor(ATTACK_SPEED_FWD + 10);
-      setRightMotor(ATTACK_SPEED_FWD + 30); // More aggressive turn
+      // Opponent slightly left of center - gentler turn
+      setLeftMotor(ATTACK_SPEED_FWD + 5);
+      setRightMotor(ATTACK_SPEED_FWD + 15); // Reduced differential
     }
     else if (!IRValues[2] && IRValues[4])
     {
-      // Opponent slightly right of center
-      setLeftMotor(ATTACK_SPEED_FWD + 30); // More aggressive turn
-      setRightMotor(ATTACK_SPEED_FWD + 10);
+      // Opponent slightly right of center - gentler turn
+      setLeftMotor(ATTACK_SPEED_FWD + 15); // Reduced differential
+      setRightMotor(ATTACK_SPEED_FWD + 5);
     }
     else
     {
-      // Direct center attack with max speed
-      setLeftMotor(ATTACK_SPEED_FWD + 40); // Maximum attack speed
-      setRightMotor(ATTACK_SPEED_FWD + 40);
+      // Direct center attack with balanced speed
+      setLeftMotor(ATTACK_SPEED_FWD + 25);
+      setRightMotor(ATTACK_SPEED_FWD + 25);
     }
     logStateChange("Attacking center",
                    (IRValues[2] || IRValues[3] || IRValues[4]),
@@ -484,9 +520,24 @@ void mainFUNC()
   }
 
   case 4:
-  {                                       // Opponent at right - more aggressive turn
-    setLeftMotor(ATTACK_SPEED_FWD + 11);  // Faster forward
-    setRightMotor(SEARCH_SPEED_BWD - 10); // Faster backward
+  { // Opponent at right - more precise turning
+    // More gradual turn with slightly reduced differential
+    setLeftMotor(ATTACK_SPEED_FWD + TURN_SPEED_MODERATE);
+    setRightMotor(SEARCH_SPEED_BWD - TURN_SPEED_MODERATE);
+
+    // If we just detected the opponent on the right
+    if (lastOpponentState != 4)
+    {
+      stabilizingTurn = true;
+      turnStabilizeTimer = currentMillis;
+    }
+
+    // Add a stabilization phase to prevent overturning
+    if (stabilizingTurn && currentMillis - turnStabilizeTimer >= 150)
+    {
+      stabilizingTurn = false;
+    }
+
     logStateChange("Attacking right", IRValues[5], lastIRValues[5]);
     break;
   }
